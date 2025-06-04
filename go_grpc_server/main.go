@@ -16,21 +16,23 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+
+	llmpb "github.com/bharathgajula/go-grpc-gemma-api/pb"
 )
 
 // LLMServer implements the LLMServiceServer interface
 type LLMServer struct {
-	UnimplementedLLMServiceServer
+	llmpb.UnimplementedLLMServiceServer
 	pythonHost string
 	httpClient *http.Client
 }
 
 // PythonRequest represents the request format for the Python server
 type PythonRequest struct {
-	Prompt        string  `json:"prompt"`
-	ModelID       string  `json:"model_id"`
-	Temperature   float32 `json:"temperature"`
-	MaxNewTokens  int32   `json:"max_new_tokens"`
+	Prompt       string  `json:"prompt"`
+	ModelID      string  `json:"model_id"`
+	Temperature  float32 `json:"temperature"`
+	MaxNewTokens int32   `json:"max_new_tokens"`
 }
 
 // PythonResponse represents the response format from the Python server
@@ -57,7 +59,7 @@ func NewLLMServer(pythonHost string) *LLMServer {
 }
 
 // GenerateText implements the unary RPC for text generation
-func (s *LLMServer) GenerateText(ctx context.Context, req *GenerateRequest) (*GenerateResponse, error) {
+func (s *LLMServer) GenerateText(ctx context.Context, req *llmpb.GenerateRequest) (*llmpb.GenerateResponse, error) {
 	log.Printf("Received GenerateText request: prompt=%s, model_id=%s, temperature=%f, max_new_tokens=%d",
 		req.Prompt, req.ModelId, req.Temperature, req.MaxNewTokens)
 
@@ -111,13 +113,13 @@ func (s *LLMServer) GenerateText(ctx context.Context, req *GenerateRequest) (*Ge
 	}
 
 	log.Printf("Successfully generated text: %d characters", len(pythonResp.GeneratedText))
-	return &GenerateResponse{
+	return &llmpb.GenerateResponse{
 		GeneratedText: pythonResp.GeneratedText,
 	}, nil
 }
 
 // StreamGenerateText implements the server-side streaming RPC for text generation
-func (s *LLMServer) StreamGenerateText(req *GenerateRequest, stream grpc.ServerStreamingServer[StreamGenerateResponse]) error {
+func (s *LLMServer) StreamGenerateText(req *llmpb.GenerateRequest, stream grpc.ServerStreamingServer[llmpb.StreamGenerateResponse]) error {
 	log.Printf("Received StreamGenerateText request: prompt=%s, model_id=%s, temperature=%f, max_new_tokens=%d",
 		req.Prompt, req.ModelId, req.Temperature, req.MaxNewTokens)
 
@@ -179,7 +181,7 @@ func (s *LLMServer) StreamGenerateText(req *GenerateRequest, stream grpc.ServerS
 		}
 
 		// Send the partial text to the client
-		if err := stream.Send(&StreamGenerateResponse{
+		if err := stream.Send(&llmpb.StreamGenerateResponse{
 			PartialText: pythonResp.PartialText,
 			Done:        pythonResp.Done,
 		}); err != nil {
@@ -197,7 +199,7 @@ func (s *LLMServer) StreamGenerateText(req *GenerateRequest, stream grpc.ServerS
 		select {
 		case <-stream.Context().Done():
 			log.Printf("Stream context cancelled")
-			return status.Errorf(codes.Cancelled, "Stream cancelled by client")
+			return status.Errorf(codes.Canceled, "Stream cancelled by client")
 		default:
 		}
 	}
@@ -263,7 +265,7 @@ func main() {
 
 	// Register LLM service
 	llmServer := NewLLMServer(pythonHost)
-	RegisterLLMServiceServer(grpcServer, llmServer)
+	llmpb.RegisterLLMServiceServer(grpcServer, llmServer)
 
 	// Enable reflection for debugging
 	reflection.Register(grpcServer)
