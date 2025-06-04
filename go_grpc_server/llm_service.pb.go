@@ -4,7 +4,7 @@
 // 	protoc        v4.25.3
 // source: llm_service.proto
 
-package __
+package main
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"

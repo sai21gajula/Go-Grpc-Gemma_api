@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+  <title>LLM Chat</title>
+</head>
+<body>
+  <h1>LLM Chat Demo</h1>
+  <form method="post">
+    <textarea name="prompt" rows="4" cols="60"></textarea><br>
+    <button type="submit">Generate</button>
+  </form>
+  {% if history %}
+  <h2>Conversation</h2>
+  <ul>
+  {% for item in history %}
+    <li><strong>You:</strong> {{item.prompt}}<br><strong>LLM:</strong> {{item.response}}</li>
+  {% endfor %}
+  </ul>
+  {% endif %}
+</body>
+</html>

@@ -16,6 +16,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // LLMServer implements the LLMServiceServer interface
@@ -25,12 +28,32 @@ type LLMServer struct {
 	httpClient *http.Client
 }
 
+var (
+	unaryRequestsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "llm_unary_requests_total",
+		Help: "Total number of unary GenerateText requests",
+	})
+	streamRequestsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "llm_stream_requests_total",
+		Help: "Total number of StreamGenerateText requests",
+	})
+	streamTokensTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "llm_stream_tokens_total",
+		Help: "Total number of tokens streamed to clients",
+	})
+	requestDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "llm_request_duration_seconds",
+		Help:    "Duration of requests to the Python server",
+		Buckets: prometheus.DefBuckets,
+	})
+)
+
 // PythonRequest represents the request format for the Python server
 type PythonRequest struct {
-	Prompt        string  `json:"prompt"`
-	ModelID       string  `json:"model_id"`
-	Temperature   float32 `json:"temperature"`
-	MaxNewTokens  int32   `json:"max_new_tokens"`
+	Prompt       string  `json:"prompt"`
+	ModelID      string  `json:"model_id"`
+	Temperature  float32 `json:"temperature"`
+	MaxNewTokens int32   `json:"max_new_tokens"`
 }
 
 // PythonResponse represents the response format from the Python server
@@ -56,10 +79,20 @@ func NewLLMServer(pythonHost string) *LLMServer {
 	}
 }
 
+func init() {
+	prometheus.MustRegister(unaryRequestsTotal)
+	prometheus.MustRegister(streamRequestsTotal)
+	prometheus.MustRegister(streamTokensTotal)
+	prometheus.MustRegister(requestDuration)
+}
+
 // GenerateText implements the unary RPC for text generation
 func (s *LLMServer) GenerateText(ctx context.Context, req *GenerateRequest) (*GenerateResponse, error) {
 	log.Printf("Received GenerateText request: prompt=%s, model_id=%s, temperature=%f, max_new_tokens=%d",
 		req.Prompt, req.ModelId, req.Temperature, req.MaxNewTokens)
+
+	start := time.Now()
+	unaryRequestsTotal.Inc()
 
 	// Prepare request for Python server
 	pythonReq := PythonRequest{
@@ -111,6 +144,7 @@ func (s *LLMServer) GenerateText(ctx context.Context, req *GenerateRequest) (*Ge
 	}
 
 	log.Printf("Successfully generated text: %d characters", len(pythonResp.GeneratedText))
+	requestDuration.Observe(time.Since(start).Seconds())
 	return &GenerateResponse{
 		GeneratedText: pythonResp.GeneratedText,
 	}, nil
@@ -120,6 +154,9 @@ func (s *LLMServer) GenerateText(ctx context.Context, req *GenerateRequest) (*Ge
 func (s *LLMServer) StreamGenerateText(req *GenerateRequest, stream grpc.ServerStreamingServer[StreamGenerateResponse]) error {
 	log.Printf("Received StreamGenerateText request: prompt=%s, model_id=%s, temperature=%f, max_new_tokens=%d",
 		req.Prompt, req.ModelId, req.Temperature, req.MaxNewTokens)
+
+	start := time.Now()
+	streamRequestsTotal.Inc()
 
 	// Prepare request for Python server
 	pythonReq := PythonRequest{
@@ -188,6 +225,7 @@ func (s *LLMServer) StreamGenerateText(req *GenerateRequest, stream grpc.ServerS
 		}
 
 		tokenCount++
+		streamTokensTotal.Inc()
 		if pythonResp.Done {
 			log.Printf("Streaming completed: sent %d tokens", tokenCount)
 			break
@@ -197,10 +235,12 @@ func (s *LLMServer) StreamGenerateText(req *GenerateRequest, stream grpc.ServerS
 		select {
 		case <-stream.Context().Done():
 			log.Printf("Stream context cancelled")
-			return status.Errorf(codes.Cancelled, "Stream cancelled by client")
+			return status.Errorf(codes.Canceled, "Stream cancelled by client")
 		default:
 		}
 	}
+
+	requestDuration.Observe(time.Since(start).Seconds())
 
 	return nil
 }
@@ -228,6 +268,17 @@ func waitForPythonServer(pythonHost string, maxRetries int) error {
 	return fmt.Errorf("Python server not ready after %d attempts", maxRetries)
 }
 
+func startMetricsServer(port string) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	go func() {
+		log.Printf("Metrics server listening on :%s/metrics", port)
+		if err := http.ListenAndServe(":"+port, mux); err != nil {
+			log.Printf("Metrics server error: %v", err)
+		}
+	}()
+}
+
 func main() {
 	// Configuration from environment variables
 	pythonHost := os.Getenv("PYTHON_HOST")
@@ -240,8 +291,15 @@ func main() {
 		port = "7860"
 	}
 
+	metricsPort := os.Getenv("METRICS_PORT")
+	if metricsPort == "" {
+		metricsPort = "9090"
+	}
+
 	log.Printf("Starting Go gRPC server on port %s", port)
 	log.Printf("Python server host: %s", pythonHost)
+	log.Printf("Metrics exposed at :%s/metrics", metricsPort)
+	startMetricsServer(metricsPort)
 
 	// Wait for Python server to be ready
 	log.Printf("Waiting for Python server to be ready...")
