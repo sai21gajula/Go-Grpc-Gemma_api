@@ -1,12 +1,13 @@
 from flask import Flask, render_template, request, session
 import grpc
+import os
 import llm_service_pb2
 import llm_service_pb2_grpc
 
 app = Flask(__name__)
 app.secret_key = "dev"
 
-GRPC_HOST = 'localhost:7860'
+GRPC_HOST = os.getenv("GRPC_HOST", "localhost:7860")
 
 @app.route('/', methods=['GET', 'POST'])
 def index():

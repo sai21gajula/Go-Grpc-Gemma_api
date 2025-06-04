@@ -9,12 +9,14 @@ echo "=========================================="
 PYTHON_PORT=${PYTHON_PORT:-8001}
 PYTHON_HOST=${PYTHON_HOST:-http://localhost:8001}
 GRPC_PORT=${PORT:-7860}
+METRICS_PORT=${METRICS_PORT:-9090}
 MAX_STARTUP_WAIT=${MAX_STARTUP_WAIT:-300}
 
 echo "Configuration:"
 echo "  Python server port: $PYTHON_PORT"
 echo "  Python server host: $PYTHON_HOST"
 echo "  gRPC server port: $GRPC_PORT"
+echo "  Metrics port: $METRICS_PORT"
 echo "  Model ID: $MODEL_ID"
 echo "  Max startup wait: ${MAX_STARTUP_WAIT}s"
 echo "=========================================="
@@ -93,4 +95,5 @@ echo "=========================================="
 
 # Start Go gRPC server in foreground
 export WAIT_FOR_PYTHON=false  # Python server is already verified
+export METRICS_PORT
 exec ./grpc-server

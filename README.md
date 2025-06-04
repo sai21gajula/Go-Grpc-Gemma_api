@@ -23,6 +23,8 @@ High-performance LLM serving with hybrid Go/Python architecture for Hugging Face
 - **Streaming Support**: Real-time token-by-token text generation
 - **Resource Optimized**: Designed for CPU Basic tier (2 vCPUs, 16GB RAM)
 - **Production Ready**: Comprehensive error handling and logging
+- **Prometheus Metrics**: Exposes request and token statistics on `/metrics`
+- **Flask Frontend**: Simple web UI for manual testing
 
 ## 📋 API Reference
 
@@ -196,6 +198,10 @@ docker run -p 7860:7860 gemma-grpc-api
 - `MODEL_ID`: Model identifier (default: google/gemma-3n-E4B-it-litert-preview)
 - `HF_HOME`: Hugging Face cache directory
 - `MAX_STARTUP_WAIT`: Maximum startup wait time in seconds (default: 300)
+- `METRICS_PORT`: Prometheus metrics port for the Go server (default: 9090)
+- `GRPC_HOST`: gRPC endpoint for the Flask frontend (default: localhost:7860)
+
+Metrics are available at `http://localhost:$METRICS_PORT/metrics` when running locally.
 
 ## 🐛 Troubleshooting
 

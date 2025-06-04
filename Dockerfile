@@ -97,6 +97,7 @@ ENV MODEL_ID=google/gemma-3n-E4B-it-litert-preview
 ENV PYTHON_PORT=8001
 ENV PYTHON_HOST=http://localhost:8001
 ENV PORT=7860
+ENV METRICS_PORT=9090
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies
@@ -129,8 +130,9 @@ COPY --from=go-builder /app/pb /app/pb
 COPY run_app.sh .
 RUN chmod +x run_app.sh
 
-# Expose the gRPC port
+# Expose gRPC and metrics ports
 EXPOSE 7860
+EXPOSE 9090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \

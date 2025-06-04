@@ -29,8 +29,9 @@ case $COMMAND in
         cd go_grpc_server
         export PORT=7860
         export PYTHON_HOST=http://localhost:8001
+        export METRICS_PORT=9090
         export WAIT_FOR_PYTHON=false
-        go run main.go
+        go run .
         ;;
     
     "deps")
