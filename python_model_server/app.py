@@ -251,25 +251,14 @@ async def stream_predict(request: GenerateRequest):
     logger.info(f"Processing streaming request: {request.prompt[:50]}...")
     
     async def generate_async():
-        """Async wrapper for the streaming generator"""
-        loop = asyncio.get_event_loop()
-        
-        # Run the synchronous generator in a thread pool
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                list, 
-                generate_stream(
-                    request.prompt, 
-                    request.model_id, 
-                    request.temperature, 
-                    request.max_new_tokens
-                )
-            )
-            
-            # Wait for completion and yield results
-            results = await loop.run_in_executor(None, future.result)
-            for result in results:
-                yield json.dumps(result.dict()) + "\n"
+        """Yield streaming results from the synchronous generator."""
+        for result in generate_stream(
+            request.prompt,
+            request.model_id,
+            request.temperature,
+            request.max_new_tokens,
+        ):
+            yield json.dumps(result.dict()) + "\n"
     
     return StreamingResponse(
         generate_async(),
