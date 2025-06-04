@@ -2,7 +2,8 @@ syntax = "proto3";
 
 package llm_service;
 
-option go_package = ".";
+// go_package specifies the Go import path for the generated code
+option go_package = "github.com/bharathgajula/go-grpc-gemma-api/pb;llmpb";
 
 // LLM Service for text generation
 service LLMService {
