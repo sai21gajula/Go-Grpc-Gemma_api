@@ -292,7 +292,6 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    import concurrent.futures
     
     port = int(os.getenv("PYTHON_PORT", "8001"))
     
