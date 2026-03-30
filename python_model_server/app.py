@@ -98,18 +98,22 @@ class EvaluateResponse(BaseModel):
 
 def _build_bnb_config() -> Optional[BitsAndBytesConfig]:
     """
-    Build bitsandbytes NF4 quantization config — equivalent to Google's E4B TurboQuant.
+    Build bitsandbytes NF4 weight quantization config.
 
-    NF4 (NormalFloat4) quantization:
-    - Stores weights as 4-bit values using a data type optimized for normally-
-      distributed weights (which neural network weights typically are).
-    - Dequantizes to bfloat16 for matrix multiplications.
-    - Uses double quantization (quantizes the quantization constants themselves)
-      for an extra ~0.4 bits/param saving — total ~4.5 bits/param.
-    - Memory: a 4B param model goes from ~16GB (fp32) to ~2.5GB (NF4).
+    NF4 (NormalFloat4) is a *weight* quantization format — it reduces the
+    stored model weight precision from fp32 to ~4.5 bits/param at load time.
+    This is separate from TurboQuant, which is a *KV cache* compression
+    algorithm (inference-time, ICLR 2026).
 
-    This is functionally identical to Google LiteRT's E4B format used in
-    gemma-3n-E4B-it-litert-preview.
+    NF4 details:
+    - 16 quantization levels optimally spaced for normally-distributed weights
+    - Dequantizes to bfloat16 for matrix multiplications
+    - Double quantization (quantizes the absmax scale factors too): ~0.4 bits/param extra saving
+    - Net: ~4.5 bits/param  →  4B model: ~16GB (fp32) → ~2.5GB (NF4)
+
+    E4B in gemma-3n-E4B-it-litert-preview stands for "Efficient 4-Bit" — Google's
+    NF4-equivalent format compiled into LiteRT (TFLite) flatbuffer for on-device deployment.
+    This bitsandbytes config replicates the same compression for server-side inference.
     """
     try:
         import bitsandbytes  # noqa: F401
@@ -389,8 +393,10 @@ async def root():
             "POST /evaluate":       "BLEU + ROUGE-L quality scoring",
         },
         "quantization_note": (
-            "Uses NF4 4-bit quantization (bitsandbytes) when USE_QUANTIZATION=true. "
-            "NF4 is functionally equivalent to Google LiteRT's E4B (TurboQuant). "
+            "Uses NF4 4-bit weight quantization (bitsandbytes) when USE_QUANTIZATION=true. "
+            "NF4 is equivalent to Google LiteRT's E4B format (Efficient 4-Bit). "
+            "Note: TurboQuant (ICLR 2026) is a separate KV-cache compression algorithm "
+            "and is not the same as NF4 weight quantization. "
             "Memory: ~2.5GB for 4B params vs ~16GB fp32."
         ),
     }
