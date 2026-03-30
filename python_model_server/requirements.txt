@@ -1,12 +1,30 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-torch==2.1.1+cpu
-transformers==4.36.2
-accelerate==0.25.0
-pydantic==2.5.1
-typing-extensions==4.8.0
-huggingface-hub==0.19.4
-tokenizers==0.15.0
-safetensors==0.4.1
-requests==2.31.0
-numpy==1.24.4
+# Core serving
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.4
+typing-extensions==4.12.2
+
+# PyTorch — CPU-only build keeps image size reasonable.
+# For GPU instances, replace with: torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu
+
+# HuggingFace stack
+transformers==4.48.3
+accelerate==1.3.0
+huggingface-hub==0.27.1
+tokenizers==0.21.0
+safetensors==0.4.5
+
+# TurboQuant-equivalent 4-bit quantization (NF4 via bitsandbytes)
+# Install is optional — server gracefully falls back to fp32 if unavailable.
+# Note: bitsandbytes GPU support requires CUDA; CPU-only support is partial.
+bitsandbytes==0.45.1
+
+# Evaluation metrics
+nltk==3.9.1
+rouge-score==0.1.2
+scipy==1.14.1
+numpy==1.26.4
+
+# HTTP client
+requests==2.32.3

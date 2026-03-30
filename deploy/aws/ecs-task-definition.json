@@ -1,0 +1,100 @@
+{
+  "family": "multi-llm-grpc",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "4096",
+  "memory": "16384",
+  "executionRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskRole",
+
+  "containerDefinitions": [
+    {
+      "name": "multi-llm-grpc",
+      "image": "<account-id>.dkr.ecr.<region>.amazonaws.com/multi-llm-grpc:latest",
+      "essential": true,
+
+      "portMappings": [
+        {
+          "containerPort": 7860,
+          "hostPort": 7860,
+          "protocol": "tcp",
+          "name": "grpc"
+        }
+      ],
+
+      "environment": [
+        {"name": "MODEL_ID",          "value": "google/gemma-3-4b-it"},
+        {"name": "USE_QUANTIZATION",  "value": "true"},
+        {"name": "GEMMA_QUANT",       "value": "int4_nf4"},
+        {"name": "PORT",              "value": "7860"},
+        {"name": "PYTHON_PORT",       "value": "8001"},
+        {"name": "PYTHON_HOST",       "value": "http://localhost:8001"},
+        {"name": "ENABLE_OLLAMA",     "value": "false"}
+      ],
+
+      "secrets": [
+        {
+          "name": "GEMINI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:<region>:<account-id>:secret:llm-platform/gemini-api-key"
+        },
+        {
+          "name": "HF_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:<region>:<account-id>:secret:llm-platform/hf-token"
+        }
+      ],
+
+      "mountPoints": [
+        {
+          "sourceVolume": "model-cache",
+          "containerPath": "/app/cache",
+          "readOnly": false
+        },
+        {
+          "sourceVolume": "benchmark-results",
+          "containerPath": "/app/benchmarks",
+          "readOnly": false
+        }
+      ],
+
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8001/health | python3 -c \"import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='healthy' else 1)\""],
+        "interval": 30,
+        "timeout": 10,
+        "retries": 5,
+        "startPeriod": 180
+      },
+
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/multi-llm-grpc",
+          "awslogs-region": "<region>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+
+      "ulimits": [
+        {
+          "name": "nofile",
+          "softLimit": 65536,
+          "hardLimit": 65536
+        }
+      ]
+    }
+  ],
+
+  "volumes": [
+    {
+      "name": "model-cache",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "<efs-filesystem-id>",
+        "rootDirectory": "/model-cache",
+        "transitEncryption": "ENABLED"
+      }
+    },
+    {
+      "name": "benchmark-results",
+      "host": {}
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+# Ollama Modelfile for Qwen3-4B
+# Usage: ollama create qwen3-research -f ollama/Modelfile.qwen3-4b
+#
+# Qwen3-4B (Alibaba Cloud, 2025) — Apache 2.0 license
+# Quantization: Q4_K_M GGUF (equivalent to INT4 with improved key-value quantization)
+# Memory: ~2.3GB RAM
+# Thinking mode: prefix prompt with "/think" to enable chain-of-thought reasoning
+
+FROM qwen3:4b
+
+SYSTEM """You are a helpful AI assistant. You provide clear, accurate, and concise answers.
+When asked about technical topics like machine learning, quantization, or gRPC, provide
+precise technical explanations with examples where helpful."""
+
+# Generation parameters optimised for research comparisons
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER num_predict 256
+PARAMETER repeat_penalty 1.1
+
+# Context window
+PARAMETER num_ctx 4096

@@ -2,32 +2,107 @@ syntax = "proto3";
 
 package llm_service;
 
-option go_package = ".";
+option go_package = ".;main";
 
-// LLM Service for text generation
+// LLMService provides multi-model text generation with evaluation and benchmarking.
+// Supports local models (Gemma 4B, Qwen2.5-3B) and cloud models (Gemini).
 service LLMService {
-  // Unary RPC for standard text generation
+  // Unary RPC for standard text generation - routes by model_id prefix
   rpc GenerateText(GenerateRequest) returns (GenerateResponse);
-  
+
   // Server-side streaming RPC for token-by-token generation
   rpc StreamGenerateText(GenerateRequest) returns (stream StreamGenerateResponse);
+
+  // Run a prompt through multiple models and score each against a reference answer.
+  // Returns BLEU, ROUGE-L, latency, tokens/sec, and cost per model.
+  rpc EvaluateGeneration(EvaluateRequest) returns (EvaluateResponse);
+
+  // Full benchmark: N prompts × M models × K runs.
+  // Optionally compares gRPC path vs direct REST path.
+  // Writes a timestamped JSON report to disk.
+  rpc BenchmarkModels(BenchmarkRequest) returns (BenchmarkResponse);
 }
 
-// Request message for text generation
+// ─── Core generation messages (unchanged) ───────────────────────────────────
+
 message GenerateRequest {
-  string prompt = 1;
-  string model_id = 2;
-  float temperature = 3;
-  int32 max_new_tokens = 4;
+  string prompt        = 1;
+  string model_id      = 2;  // prefix routing: "gemma:", "qwen:", "gemini:"
+  float  temperature   = 3;
+  int32  max_new_tokens = 4;
 }
 
-// Response message for unary text generation
 message GenerateResponse {
   string generated_text = 1;
 }
 
-// Response message for streaming text generation
 message StreamGenerateResponse {
   string partial_text = 1;
-  bool done = 2;
+  bool   done         = 2;
+}
+
+// ─── Evaluation messages ─────────────────────────────────────────────────────
+
+message EvaluateRequest {
+  string          prompt           = 1;
+  string          reference_answer = 2;   // ground-truth for BLEU/ROUGE
+  repeated string model_ids        = 3;   // list of model_id values to compare
+  float           temperature      = 4;
+  int32           max_new_tokens   = 5;
+}
+
+// Per-model metrics returned by both Evaluate and Benchmark RPCs
+message ModelMetrics {
+  string model_id          = 1;
+  string generated_text    = 2;
+  double latency_ms        = 3;   // wall-clock request latency
+  double ttft_ms           = 4;   // time-to-first-token (streaming)
+  double tokens_per_sec    = 5;
+  double bleu_score        = 6;   // 0–1; 0 if no reference provided
+  double rouge_l           = 7;   // ROUGE-L F1; 0 if no reference provided
+  double estimated_cost_usd = 8;  // 0.0 for local models
+  string backend_type      = 9;   // "gemma_hf" | "ollama" | "gemini"
+  string quantization      = 10;  // "fp32" | "int4_nf4" | "q4_k_m" | "none"
+  int32  token_count       = 11;  // number of generated tokens
+}
+
+message EvaluateResponse {
+  repeated ModelMetrics results     = 1;
+  string                report_path = 2;  // path to written JSON report
+}
+
+// ─── Benchmark messages ───────────────────────────────────────────────────────
+
+message BenchmarkRequest {
+  repeated string prompts                = 1;  // prompts to run
+  repeated string model_ids             = 2;  // models to compare
+  int32           runs_per_prompt       = 3;  // repetitions for averaging (default 3)
+  bool            include_rest_comparison = 4; // also hit Python /predict directly
+  float           temperature           = 5;
+  int32           max_new_tokens        = 6;
+}
+
+// Aggregated stats across all prompts/runs for one model
+message AggregatedMetrics {
+  string model_id          = 1;
+  double avg_latency_ms    = 2;
+  double p50_latency_ms    = 3;
+  double p95_latency_ms    = 4;
+  double p99_latency_ms    = 5;
+  double avg_tokens_per_sec = 6;
+  double avg_bleu           = 7;
+  double avg_rouge_l        = 8;
+  double estimated_cost_usd = 9;   // total across all runs
+  string backend_type       = 10;
+  string quantization       = 11;
+  int32  total_runs         = 12;
+  // REST comparison fields (populated when include_rest_comparison=true)
+  double rest_avg_latency_ms = 13;
+  double grpc_vs_rest_delta_ms = 14;
+}
+
+message BenchmarkResponse {
+  repeated AggregatedMetrics aggregated    = 1;
+  string                     json_report_path = 2;
+  string                     summary          = 3;  // human-readable summary table
 }

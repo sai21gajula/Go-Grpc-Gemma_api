@@ -1,96 +1,82 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# run_app.sh — Orchestration script for the Go-gRPC Multi-LLM Platform
+# Starts Python inference server (+ optional Ollama) then launches Go gRPC gateway.
+set -euo pipefail
 
-echo "=========================================="
-echo "Starting Gemma LLM Hybrid Server"
-echo "=========================================="
+echo "═══════════════════════════════════════════════════════════"
+echo "  Go-gRPC Multi-LLM Research Platform"
+echo "═══════════════════════════════════════════════════════════"
 
-# Environment variables
 PYTHON_PORT=${PYTHON_PORT:-8001}
 PYTHON_HOST=${PYTHON_HOST:-http://localhost:8001}
+OLLAMA_HOST=${OLLAMA_HOST:-http://localhost:11434}
 GRPC_PORT=${PORT:-7860}
 MAX_STARTUP_WAIT=${MAX_STARTUP_WAIT:-300}
+MODEL_ID=${MODEL_ID:-google/gemma-3-4b-it}
+ENABLE_OLLAMA=${ENABLE_OLLAMA:-false}
+OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:4b}
 
-echo "Configuration:"
-echo "  Python server port: $PYTHON_PORT"
-echo "  Python server host: $PYTHON_HOST"
-echo "  gRPC server port: $GRPC_PORT"
-echo "  Model ID: $MODEL_ID"
-echo "  Max startup wait: ${MAX_STARTUP_WAIT}s"
-echo "=========================================="
+echo "  Model:       $MODEL_ID"
+echo "  Quant:       ${USE_QUANTIZATION:-true} (NF4/TurboQuant)"
+echo "  gRPC port:   $GRPC_PORT"
+echo "  Python port: $PYTHON_PORT"
+echo "  Ollama:      ${ENABLE_OLLAMA} (model: $OLLAMA_MODEL)"
+echo "═══════════════════════════════════════════════════════════"
 
-# Function to check if Python server is ready
-check_python_server() {
-    curl -s -f "$PYTHON_HOST/health" >/dev/null 2>&1
-    return $?
-}
+# ── Cleanup on exit ───────────────────────────────────────────────────────────
+PYTHON_PID=""
+OLLAMA_PID=""
 
-# Function to wait for Python server with timeout
-wait_for_python_server() {
-    echo "Waiting for Python server to be ready..."
-    local count=0
-    local max_attempts=$((MAX_STARTUP_WAIT / 5))
-    
-    while ! check_python_server; do
-        if [ $count -ge $max_attempts ]; then
-            echo "ERROR: Python server failed to start within ${MAX_STARTUP_WAIT} seconds"
-            echo "Checking Python server logs..."
-            if [ -f /tmp/python_server.log ]; then
-                tail -20 /tmp/python_server.log
-            fi
-            exit 1
-        fi
-        
-        count=$((count + 1))
-        echo "  Attempt $count/$max_attempts - Python server not ready yet..."
-        sleep 5
-    done
-    
-    echo "✅ Python server is ready!"
-}
-
-# Function to cleanup background processes
 cleanup() {
-    echo "Cleaning up..."
-    if [ ! -z "$PYTHON_PID" ]; then
-        echo "Stopping Python server (PID: $PYTHON_PID)..."
-        kill $PYTHON_PID 2>/dev/null || true
-        wait $PYTHON_PID 2>/dev/null || true
-    fi
+    echo "[shutdown] Cleaning up..."
+    [[ -n "$PYTHON_PID" ]] && kill "$PYTHON_PID" 2>/dev/null && wait "$PYTHON_PID" 2>/dev/null || true
+    [[ -n "$OLLAMA_PID" ]] && kill "$OLLAMA_PID" 2>/dev/null && wait "$OLLAMA_PID" 2>/dev/null || true
     exit 0
 }
-
-# Set up signal handlers
 trap cleanup SIGTERM SIGINT
 
-# Start Python FastAPI server in background
-echo "Starting Python model server..."
+# ── Python server ─────────────────────────────────────────────────────────────
+echo "[startup] Starting Python inference server (model: $MODEL_ID)..."
 cd python_model_server
 python app.py > /tmp/python_server.log 2>&1 &
 PYTHON_PID=$!
 cd ..
+echo "[startup] Python PID: $PYTHON_PID"
 
-echo "Python server started with PID: $PYTHON_PID"
+# Wait for Python server readiness
+echo "[startup] Waiting for Python server..."
+waited=0
+until curl -sf "$PYTHON_HOST/health" | python3 -c \
+    "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='healthy' else 1)" \
+    > /dev/null 2>&1; do
+    if (( waited >= MAX_STARTUP_WAIT )); then
+        echo "[ERROR] Python server not ready after ${MAX_STARTUP_WAIT}s"
+        echo "--- Last 30 lines of python_server.log ---"
+        tail -30 /tmp/python_server.log 2>/dev/null || true
+        exit 1
+    fi
+    echo "  ...waiting ($waited / $MAX_STARTUP_WAIT s)"
+    sleep 5
+    waited=$((waited + 5))
+done
+echo "[startup] Python server is healthy."
 
-# Wait for Python server to be ready
-wait_for_python_server
-
-# Verify model is loaded
-echo "Verifying model loading status..."
-HEALTH_RESPONSE=$(curl -s "$PYTHON_HOST/health" || echo '{"model_loaded": false}')
-MODEL_LOADED=$(echo "$HEALTH_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('model_loaded', False))" 2>/dev/null || echo "false")
-
-if [ "$MODEL_LOADED" = "True" ] || [ "$MODEL_LOADED" = "true" ]; then
-    echo "✅ Model loaded successfully!"
-else
-    echo "⚠️  Model may still be loading, but Python server is responsive"
+# ── Ollama (optional, for Qwen) ───────────────────────────────────────────────
+if [[ "$ENABLE_OLLAMA" == "true" ]]; then
+    if command -v ollama &>/dev/null; then
+        echo "[startup] Starting Ollama..."
+        OLLAMA_HOST_ENV=${OLLAMA_HOST#http://} ollama serve > /tmp/ollama.log 2>&1 &
+        OLLAMA_PID=$!
+        sleep 3
+        echo "[startup] Pulling $OLLAMA_MODEL (may take a while on first run)..."
+        ollama pull "$OLLAMA_MODEL" || echo "[warn] Failed to pull $OLLAMA_MODEL — Qwen backend may not work"
+        echo "[startup] Ollama ready."
+    else
+        echo "[warn] ENABLE_OLLAMA=true but ollama is not installed — Qwen backend unavailable"
+    fi
 fi
 
-echo "=========================================="
-echo "Starting Go gRPC server..."
-echo "Server will be available at: 0.0.0.0:$GRPC_PORT"
-echo "=========================================="
-
-# Start Go gRPC server in foreground
-export WAIT_FOR_PYTHON=false  # Python server is already verified
+# ── Go gRPC server ────────────────────────────────────────────────────────────
+echo "[startup] Starting Go gRPC server on port $GRPC_PORT..."
+export WAIT_FOR_PYTHON=false  # already verified above
 exec ./grpc-server

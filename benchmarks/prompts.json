@@ -1,0 +1,65 @@
+{
+  "description": "Standard prompt set for reproducible multi-model benchmarks.",
+  "categories": {
+    "factual": [
+      "What is the capital of France?",
+      "Who wrote the play Hamlet?",
+      "What is the speed of light in metres per second?"
+    ],
+    "reasoning": [
+      "If a train travels at 60 mph and needs to cover 150 miles, how long will the journey take?",
+      "What is the time complexity of binary search and why?"
+    ],
+    "generation": [
+      "Write a two-sentence summary of the history of artificial intelligence.",
+      "Explain the difference between supervised and unsupervised learning in plain English."
+    ],
+    "code": [
+      "Write a Python function that returns the nth Fibonacci number using memoization.",
+      "What does the Go defer keyword do? Give a one-line example."
+    ],
+    "grpc_research": [
+      "Why is gRPC typically faster than REST for microservice communication?",
+      "Explain HTTP/2 multiplexing and how it benefits gRPC compared to HTTP/1.1."
+    ],
+    "quantization_research": [
+      "What is NF4 quantization and how does it differ from INT4 uniform quantization?",
+      "Explain how bitsandbytes enables 4-bit LLM inference on consumer hardware."
+    ]
+  },
+  "reference_answers": {
+    "What is the capital of France?": "The capital of France is Paris.",
+    "Who wrote the play Hamlet?": "Hamlet was written by William Shakespeare.",
+    "What is the speed of light in metres per second?": "The speed of light is approximately 299,792,458 metres per second.",
+    "If a train travels at 60 mph and needs to cover 150 miles, how long will the journey take?": "The journey will take 2.5 hours.",
+    "What is the time complexity of binary search and why?": "Binary search has O(log n) time complexity because it halves the search space on each step."
+  },
+  "benchmark_sets": {
+    "quick": [
+      "What is the capital of France?",
+      "Why is gRPC typically faster than REST for microservice communication?"
+    ],
+    "standard": [
+      "What is the capital of France?",
+      "What is the time complexity of binary search and why?",
+      "Write a two-sentence summary of the history of artificial intelligence.",
+      "Why is gRPC typically faster than REST for microservice communication?",
+      "What is NF4 quantization and how does it differ from INT4 uniform quantization?"
+    ],
+    "full": [
+      "What is the capital of France?",
+      "Who wrote the play Hamlet?",
+      "What is the speed of light in metres per second?",
+      "If a train travels at 60 mph and needs to cover 150 miles, how long will the journey take?",
+      "What is the time complexity of binary search and why?",
+      "Write a two-sentence summary of the history of artificial intelligence.",
+      "Explain the difference between supervised and unsupervised learning in plain English.",
+      "Write a Python function that returns the nth Fibonacci number using memoization.",
+      "What does the Go defer keyword do? Give a one-line example.",
+      "Why is gRPC typically faster than REST for microservice communication?",
+      "Explain HTTP/2 multiplexing and how it benefits gRPC compared to HTTP/1.1.",
+      "What is NF4 quantization and how does it differ from INT4 uniform quantization?",
+      "Explain how bitsandbytes enables 4-bit LLM inference on consumer hardware."
+    ]
+  }
+}

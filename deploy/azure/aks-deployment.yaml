@@ -1,0 +1,176 @@
+# Azure Kubernetes Service (AKS) deployment for Go-gRPC Multi-LLM Platform
+#
+# Prerequisites:
+#   az login
+#   az aks get-credentials --resource-group <rg> --name <cluster>
+#   kubectl create secret generic llm-secrets \
+#     --from-literal=GEMINI_API_KEY=<your-key>
+#   kubectl create secret generic hf-token \
+#     --from-literal=HF_TOKEN=<your-huggingface-token>
+#
+# Recommended VM size:  Standard_D8s_v3  (8 vCPU, 32GB RAM) for fp32
+#                       Standard_D4s_v3  (4 vCPU, 16GB RAM) for NF4 4-bit
+#
+# Deploy:
+#   kubectl apply -f aks-deployment.yaml
+#   kubectl get service multi-llm-grpc-svc   # get external IP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-llm-grpc
+  labels:
+    app: multi-llm-grpc
+    component: llm-platform
+spec:
+  replicas: 1  # Single replica; scale up for load testing
+  selector:
+    matchLabels:
+      app: multi-llm-grpc
+  template:
+    metadata:
+      labels:
+        app: multi-llm-grpc
+    spec:
+      # Allow up to 10 minutes for model loading
+      terminationGracePeriodSeconds: 600
+
+      containers:
+        - name: multi-llm-grpc
+          image: <your-acr>.azurecr.io/multi-llm-grpc:latest
+          # Build & push:
+          #   docker build --build-arg MODEL_ID=google/gemma-3-4b-it -t multi-llm-grpc .
+          #   docker tag multi-llm-grpc <your-acr>.azurecr.io/multi-llm-grpc:latest
+          #   docker push <your-acr>.azurecr.io/multi-llm-grpc:latest
+
+          ports:
+            - containerPort: 7860  # gRPC
+              name: grpc
+            - containerPort: 8001  # Python health (internal)
+              name: python-health
+
+          env:
+            - name: MODEL_ID
+              value: "google/gemma-3-4b-it"   # Change to Qwen/Qwen3-4B for Qwen
+            - name: USE_QUANTIZATION
+              value: "true"
+            - name: GEMMA_QUANT
+              value: "int4_nf4"
+            - name: PORT
+              value: "7860"
+            - name: PYTHON_PORT
+              value: "8001"
+            - name: PYTHON_HOST
+              value: "http://localhost:8001"
+            - name: OLLAMA_HOST
+              value: "http://localhost:11434"
+            - name: ENABLE_OLLAMA
+              value: "false"   # Set true if Ollama sidecar is deployed
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: llm-secrets
+                  key: GEMINI_API_KEY
+                  optional: true
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: HF_TOKEN
+                  optional: true
+
+          resources:
+            requests:
+              memory: "6Gi"    # NF4: ~2.5GB model + overhead
+              cpu: "2000m"
+            limits:
+              memory: "12Gi"
+              cpu: "4000m"
+
+          # Model cache — mount Azure Disk PV to persist across restarts
+          volumeMounts:
+            - name: model-cache
+              mountPath: /app/cache
+            - name: benchmark-results
+              mountPath: /app/benchmarks
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 20   # allow ~5 min for model loading
+
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache-pvc
+        - name: benchmark-results
+          emptyDir: {}
+
+---
+# Persistent volume for model cache (Azure Managed Disk, 50GB)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: managed-premium
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+# LoadBalancer service — exposes gRPC on a public IP
+# Azure Load Balancer supports gRPC (HTTP/2) natively
+apiVersion: v1
+kind: Service
+metadata:
+  name: multi-llm-grpc-svc
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: "/health"
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 7860
+      targetPort: 7860
+      protocol: TCP
+      name: grpc
+  selector:
+    app: multi-llm-grpc
+
+---
+# Horizontal Pod Autoscaler (scale by CPU for gateway layer)
+# Note: LLM inference itself is CPU-bound in Python — HPA helps the Go layer
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: multi-llm-grpc-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: multi-llm-grpc
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
