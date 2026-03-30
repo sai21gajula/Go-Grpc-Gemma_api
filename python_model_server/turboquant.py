@@ -193,7 +193,10 @@ class TurboQuantCompressor:
         Override bits for key tensors. Default: bits + 1 (keys have higher
         norm variance and benefit from extra precision).
     value_bits : int | None
-        Override bits for value tensors. Default: bits.
+        Override bits for value tensors.
+        Default: max(bits - 1, 2) — values tolerate lower precision because
+        the weighted-sum in attention averages out quantisation errors.
+        Paper recommendation: key_bits=4, value_bits=2 for 5-6× compression.
     qjl_proj_dim : int | None
         Projection dimension m for QJL. Default: head_dim.
     seed : int
@@ -215,8 +218,10 @@ class TurboQuantCompressor:
 
         self.bits       = bits
         self.use_qjl    = use_qjl
+        # Keys: higher precision (rank-ordering matters for attention weights)
         self.key_bits   = key_bits   if key_bits   is not None else min(bits + 1, 4)
-        self.value_bits = value_bits if value_bits is not None else bits
+        # Values: lower precision (errors cancel in weighted sum; paper: 2-bit values)
+        self.value_bits = value_bits if value_bits is not None else max(bits - 1, 2)
         self.qjl_proj_dim = qjl_proj_dim
         self.seed       = seed
 
@@ -471,9 +476,12 @@ try:
             cache = TurboQuantCache(compressor)
             output = model.generate(input_ids, past_key_values=cache, use_cache=True)
 
-        Memory savings vs DynamicCache (fp16):
-            bits=3 → ~4.3× reduction in KV cache RAM
-            bits=4 → ~3.2× reduction in KV cache RAM
+            # Protect sensitive layers (first 2 and last 2 stay at FP16):
+            cache = TurboQuantCache(compressor, num_layers=32, protected_layers=[0, 1, -1, -2])
+
+        Memory savings vs DynamicCache (fp16) with default key=4bit, value=2bit:
+            bits=3 → ~5× reduction in KV cache RAM
+            bits=4 → ~4× reduction in KV cache RAM
 
         Speed note:
             On CPU the decompress overhead (~2-5ms per layer) is small compared
@@ -481,11 +489,33 @@ try:
             Triton fused kernel from dejan.ai/blog/turboquant for additional
             speedup (the algebraic identity: ⟨q, R^T·c[idx]⟩ = ⟨R·q, c[idx]⟩
             avoids materialising the full decompressed tensor).
+
+        Protected layers:
+            The first and last transformer layers are most sensitive to KV
+            quantisation error (they have higher activation norms and attend
+            over a wider range of tokens). Keeping them in FP16 preserves
+            quality with negligible memory overhead (typically 2-4 layers
+            out of 32 = 6-12% of total KV cache).
         """
 
-        def __init__(self, compressor: TurboQuantCompressor):
+        def __init__(
+            self,
+            compressor: TurboQuantCompressor,
+            num_layers: Optional[int] = None,
+            protected_layers: Optional[List[int]] = None,
+        ):
             super().__init__()
             self.compressor = compressor
+            self.num_layers = num_layers
+            # Resolve negative indices if num_layers is known
+            if protected_layers is not None and num_layers is not None:
+                self._protected = set(
+                    i % num_layers for i in protected_layers
+                )
+            elif protected_layers is not None:
+                self._protected = set(i for i in protected_layers if i >= 0)
+            else:
+                self._protected = set()
             # Compressed storage (replaces parent's key_cache / value_cache lists)
             self._comp_keys:   List[Optional[CompressedKV]] = []
             self._comp_values: List[Optional[CompressedKV]] = []
@@ -505,11 +535,22 @@ try:
             """
             Compress new key/value states and append to the layer's cache.
             Returns the full (past + new) decompressed tensors for attention.
+
+            Protected layers (first/last N layers) bypass compression and
+            store tensors in their original fp16/bf16 dtype.
             """
             # Grow lists if needed
             while len(self._comp_keys) <= layer_idx:
                 self._comp_keys.append(None)
                 self._comp_values.append(None)
+
+            # Track token count (only count once, on layer 0)
+            if layer_idx == 0:
+                self._seen_tokens += key_states.shape[2]
+
+            # Protected layers: store raw tensors via parent DynamicCache
+            if layer_idx in self._protected:
+                return super().update(key_states, value_states, layer_idx, cache_kwargs)
 
             # Compress new tokens
             new_k_comp = self.compressor.compress_keys(key_states)
@@ -520,10 +561,6 @@ try:
                 self._comp_keys[layer_idx],   new_k_comp)
             self._comp_values[layer_idx] = TurboQuantCompressor._append(
                 self._comp_values[layer_idx], new_v_comp)
-
-            # Track token count (only count once, on layer 0)
-            if layer_idx == 0:
-                self._seen_tokens += key_states.shape[2]
 
             # Decompress the full cache for this layer
             all_keys   = self.compressor.decompress_keys(self._comp_keys[layer_idx])
@@ -540,6 +577,8 @@ try:
         # ----------------------------------------------------------------
 
         def get_seq_length(self, layer_idx: int = 0) -> int:
+            if layer_idx in self._protected:
+                return super().get_seq_length(layer_idx)
             if layer_idx >= len(self._comp_keys) or self._comp_keys[layer_idx] is None:
                 return 0
             return self._comp_keys[layer_idx].seq_len()
