@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Go
+*.test
+*.out
+
+# Binaries
+bin/
+/go_grpc_server/server
+
+# Benchmark outputs
+benchmarks/results_*.json
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
