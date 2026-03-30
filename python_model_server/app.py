@@ -7,26 +7,25 @@ Supports the following models (selected via MODEL_ID env var):
   • Qwen/Qwen2.5-3B-Instruct      (Qwen2.5 3B fallback)
   • google/gemma-3n-E4B-it-litert-preview  (original, backward compat)
 
-TurboQuant / Quantization strategy:
-  Google's "E4B" in the LiteRT model name stands for Efficient 4-bit — the same
-  NF4 (NormalFloat 4-bit) quantization scheme introduced in QLoRA and used by
-  Google's LiteRT (formerly TFLite) for on-device Gemma.
+Quantization stack (two independent layers):
 
-  For HuggingFace-loaded models we replicate this with bitsandbytes:
-    - load_in_4bit=True
-    - bnb_4bit_quant_type="nf4"          (NormalFloat4 — matches Google E4B)
-    - bnb_4bit_compute_dtype=bfloat16    (matmul in bf16 for speed)
-    - bnb_4bit_use_double_quant=True     (QLoRA-style nested quantization)
+  Layer 1 — NF4 Weight Quantization (load-time, via bitsandbytes):
+    Compresses stored model weights from fp32 (~16GB) to ~2.5GB for 4B models.
+    Google's "E4B" in LiteRT model names is their equivalent on-device format.
 
-  Memory savings: fp32 ~16GB → NF4 ~4GB for a 4B parameter model.
-  Quality loss: typically <2% BLEU/ROUGE degradation vs fp32.
+  Layer 2 — TurboQuant KV Cache Compression (inference-time, arXiv:2504.19874):
+    Compresses the attention Key-Value cache during generation.
+    Algorithm: random orthogonal rotation + Lloyd-Max scalar quantization (Stage 1)
+    + optional 1-bit QJL residual correction (Stage 2, arXiv:2406.03482).
+    At 3 bits: ~4.3× KV cache memory reduction with near-zero accuracy loss.
 
 Endpoints:
-  GET  /health           readiness check
-  POST /predict          unary text generation
-  POST /stream_predict   streaming text generation (NDJSON)
-  POST /evaluate         BLEU + ROUGE-L scoring (used by BenchmarkModels RPC)
-  GET  /                 API info
+  GET  /health                readiness check
+  POST /predict               unary text generation
+  POST /stream_predict        streaming text generation (NDJSON)
+  POST /evaluate              BLEU + ROUGE-L scoring
+  POST /turboquant/validate   TurboQuant compression quality check
+  GET  /turboquant/status     TurboQuant configuration and memory stats
 """
 
 import asyncio
@@ -50,21 +49,38 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
+# TurboQuant KV cache compression (arXiv:2504.19874)
+try:
+    from turboquant import TurboQuantCompressor, TurboQuantCache, validate_turboquant
+    TURBOQUANT_AVAILABLE = True
+except ImportError as _tq_err:
+    logger.warning(f"TurboQuant not available: {_tq_err}")
+    TURBOQUANT_AVAILABLE = False
+    TurboQuantCache = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-MODEL_ID   = os.getenv("MODEL_ID", "google/gemma-3-4b-it")
-HF_HOME    = os.getenv("HF_HOME", "./cache")
-USE_QUANT  = os.getenv("USE_QUANTIZATION", "true").lower() in ("true", "1", "yes")
+MODEL_ID    = os.getenv("MODEL_ID",        "google/gemma-3-4b-it")
+HF_HOME     = os.getenv("HF_HOME",         "./cache")
+USE_QUANT   = os.getenv("USE_QUANTIZATION","true").lower() in ("true", "1", "yes")
 PYTHON_PORT = int(os.getenv("PYTHON_PORT", "8001"))
+
+# TurboQuant KV cache compression config
+USE_TURBOQUANT      = os.getenv("USE_TURBOQUANT",    "true").lower() in ("true", "1", "yes")
+TURBOQUANT_BITS     = int(os.getenv("TURBOQUANT_BITS",    "3"))   # 1–4; 3 recommended
+TURBOQUANT_QJL      = os.getenv("TURBOQUANT_QJL",    "false").lower() in ("true", "1")
+TURBOQUANT_KEY_BITS = int(os.getenv("TURBOQUANT_KEY_BITS", "0"))  # 0 = auto (bits+1)
+TURBOQUANT_VAL_BITS = int(os.getenv("TURBOQUANT_VAL_BITS", "0"))  # 0 = auto (bits)
 
 # ─── Global model state ────────────────────────────────────────────────────────
 
-model      = None
-tokenizer  = None
-model_info = {"model_id": MODEL_ID, "quantization": "loading", "params_M": 0}
+model        = None
+tokenizer    = None
+tq_compressor = None   # TurboQuantCompressor instance (set after model load)
+model_info   = {"model_id": MODEL_ID, "quantization": "loading", "params_M": 0}
 model_loaded = asyncio.Event()
 
 # ─── Pydantic schemas ──────────────────────────────────────────────────────────
@@ -93,6 +109,12 @@ class EvaluateResponse(BaseModel):
     bleu: float
     rouge_l: float
     error: str = ""
+
+class TurboQuantValidateRequest(BaseModel):
+    bits: int = TURBOQUANT_BITS
+    head_dim: int = 128
+    seq_len: int = 64
+    use_qjl: bool = TURBOQUANT_QJL
 
 # ─── Model loading ─────────────────────────────────────────────────────────────
 
@@ -181,6 +203,34 @@ async def load_model():
         f"Model loaded: {MODEL_ID} | {params_M:.0f}M params | "
         f"quant={quant_label} | load_time={load_time:.1f}s"
     )
+
+    # ── TurboQuant KV cache compressor ──────────────────────────────────────
+    global tq_compressor
+    if USE_TURBOQUANT and TURBOQUANT_AVAILABLE:
+        key_bits = TURBOQUANT_KEY_BITS or None   # None → auto (bits+1)
+        val_bits = TURBOQUANT_VAL_BITS or None   # None → auto (bits)
+        tq_compressor = TurboQuantCompressor(
+            bits=TURBOQUANT_BITS,
+            use_qjl=TURBOQUANT_QJL,
+            key_bits=key_bits,
+            value_bits=val_bits,
+            seed=42,
+        )
+        model_info["turboquant"] = (
+            f"{TURBOQUANT_BITS}-bit KV cache compression "
+            f"(keys={tq_compressor.key_bits}b, values={tq_compressor.value_bits}b, "
+            f"qjl={'on' if TURBOQUANT_QJL else 'off'})"
+        )
+        logger.info(
+            f"TurboQuant enabled: {TURBOQUANT_BITS}-bit | "
+            f"keys={tq_compressor.key_bits}b | values={tq_compressor.value_bits}b | "
+            f"qjl={'on' if TURBOQUANT_QJL else 'off'}"
+        )
+    else:
+        model_info["turboquant"] = "disabled"
+        if USE_TURBOQUANT and not TURBOQUANT_AVAILABLE:
+            logger.warning("USE_TURBOQUANT=true but turboquant.py not found — continuing without KV compression")
+
     model_loaded.set()
 
 # ─── App lifecycle ─────────────────────────────────────────────────────────────
@@ -236,17 +286,24 @@ async def predict(request: GenerateRequest):
         device = next(model.parameters()).device
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
+        # Build TurboQuant KV cache if enabled
+        gen_kwargs: dict = dict(
+            **inputs,
+            max_new_tokens=request.max_new_tokens,
+            temperature=request.temperature if request.temperature > 0 else None,
+            do_sample=request.temperature > 0,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            use_cache=True,
+        )
+        tq_cache = None
+        if tq_compressor is not None and TurboQuantCache is not None:
+            tq_cache = TurboQuantCache(tq_compressor)
+            gen_kwargs["past_key_values"] = tq_cache
+
         t0 = time.time()
         with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=request.max_new_tokens,
-                temperature=request.temperature if request.temperature > 0 else None,
-                do_sample=request.temperature > 0,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                use_cache=True,
-            )
+            outputs = model.generate(**gen_kwargs)
         latency = time.time() - t0
 
         generated_text = tokenizer.decode(
@@ -255,7 +312,8 @@ async def predict(request: GenerateRequest):
         )
         token_count = outputs[0].shape[0] - inputs["input_ids"].shape[1]
 
-        logger.info(f"[predict] ok: {token_count} tokens in {latency:.2f}s")
+        tq_mem = tq_cache.memory_summary() if tq_cache is not None else "disabled"
+        logger.info(f"[predict] ok: {token_count} tokens in {latency:.2f}s | {tq_mem}")
         return GenerateResponse(generated_text=generated_text, token_count=int(token_count))
 
     except Exception as e:
@@ -265,7 +323,7 @@ async def predict(request: GenerateRequest):
 # ─── Streaming predict ─────────────────────────────────────────────────────────
 
 def _generate_stream(prompt: str, temperature: float, max_new_tokens: int):
-    """Synchronous generator for token-by-token streaming."""
+    """Synchronous generator for token-by-token streaming with TurboQuant KV cache."""
     try:
         inputs = tokenizer(
             prompt,
@@ -288,6 +346,10 @@ def _generate_stream(prompt: str, temperature: float, max_new_tokens: int):
             "use_cache": True,
             "streamer": streamer,
         }
+
+        # Attach TurboQuant KV cache if enabled
+        if tq_compressor is not None and TurboQuantCache is not None:
+            generation_kwargs["past_key_values"] = TurboQuantCache(tq_compressor)
 
         thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
         thread.start()
@@ -378,27 +440,97 @@ async def evaluate(request: EvaluateRequest):
         logger.error(f"[evaluate] error: {e}")
         return EvaluateResponse(bleu=0.0, rouge_l=0.0, error=str(e))
 
+# ─── TurboQuant endpoints ──────────────────────────────────────────────────────
+
+@app.post("/turboquant/validate")
+async def turboquant_validate(request: TurboQuantValidateRequest):
+    """
+    Run TurboQuant compression/decompression on synthetic data and return
+    quality metrics (MSE, cosine similarity, compression ratio).
+
+    Use this to verify the algorithm is working correctly and to tune
+    bit-width vs quality tradeoffs before applying to real inference.
+
+    Example (grpcurl via REST):
+        curl -X POST http://localhost:8001/turboquant/validate \\
+          -H 'Content-Type: application/json' \\
+          -d '{"bits": 3, "head_dim": 128, "seq_len": 64}'
+    """
+    if not TURBOQUANT_AVAILABLE:
+        raise HTTPException(status_code=501, detail="TurboQuant not available (turboquant.py not found)")
+
+    try:
+        compressor = TurboQuantCompressor(
+            bits=request.bits,
+            use_qjl=request.use_qjl,
+            seed=42,
+        )
+        results = validate_turboquant(
+            bits=request.bits,
+            head_dim=request.head_dim,
+            seq_len=request.seq_len,
+        )
+        results["use_qjl"] = request.use_qjl
+        results["status"] = "ok"
+        return results
+    except Exception as e:
+        logger.error(f"[turboquant/validate] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/turboquant/status")
+async def turboquant_status():
+    """
+    Return TurboQuant configuration and whether it is active for this server.
+    """
+    return {
+        "available": TURBOQUANT_AVAILABLE,
+        "enabled": tq_compressor is not None,
+        "bits": TURBOQUANT_BITS if tq_compressor else None,
+        "key_bits": tq_compressor.key_bits if tq_compressor else None,
+        "value_bits": tq_compressor.value_bits if tq_compressor else None,
+        "use_qjl": TURBOQUANT_QJL if tq_compressor else None,
+        "algorithm": (
+            "TurboQuant (arXiv:2504.19874): random orthogonal rotation "
+            "+ Lloyd-Max scalar quantization (Stage 1) "
+            "+ optional QJL 1-bit residual correction (Stage 2)"
+        ),
+        "papers": {
+            "TurboQuant": "https://arxiv.org/abs/2504.19874",
+            "PolarQuant":  "https://arxiv.org/abs/2502.02617",
+            "QJL":         "https://arxiv.org/abs/2406.03482",
+        },
+    }
+
 # ─── Root ──────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
     return {
         "service": "Multi-LLM Inference Server",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "model": model_info,
         "endpoints": {
-            "GET  /health":         "Readiness check",
-            "POST /predict":        "Unary text generation",
-            "POST /stream_predict": "Streaming text generation (NDJSON)",
-            "POST /evaluate":       "BLEU + ROUGE-L quality scoring",
+            "GET  /health":                  "Readiness check",
+            "POST /predict":                 "Unary text generation",
+            "POST /stream_predict":          "Streaming text generation (NDJSON)",
+            "POST /evaluate":                "BLEU + ROUGE-L quality scoring",
+            "POST /turboquant/validate":     "TurboQuant quality/compression check",
+            "GET  /turboquant/status":       "TurboQuant config",
         },
-        "quantization_note": (
-            "Uses NF4 4-bit weight quantization (bitsandbytes) when USE_QUANTIZATION=true. "
-            "NF4 is equivalent to Google LiteRT's E4B format (Efficient 4-Bit). "
-            "Note: TurboQuant (ICLR 2026) is a separate KV-cache compression algorithm "
-            "and is not the same as NF4 weight quantization. "
-            "Memory: ~2.5GB for 4B params vs ~16GB fp32."
-        ),
+        "quantization_layers": {
+            "layer_1_weights": (
+                "NF4 4-bit weight quantization (bitsandbytes, load-time). "
+                "Reduces 4B model from ~16GB to ~2.5GB. "
+                "Google's E4B in LiteRT = equivalent on-device format."
+            ),
+            "layer_2_kv_cache": (
+                "TurboQuant KV cache compression (inference-time, arXiv:2504.19874). "
+                "Stage 1: random rotation + Lloyd-Max scalar quantization. "
+                "Stage 2 (optional): 1-bit QJL residual correction (arXiv:2406.03482). "
+                f"Status: {'enabled at ' + str(TURBOQUANT_BITS) + '-bit' if tq_compressor else 'disabled'}."
+            ),
+        },
     }
 
 # ─── Entrypoint ────────────────────────────────────────────────────────────────
